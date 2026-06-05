@@ -19,6 +19,14 @@ import (
 	"github.com/suyashkumar/dicom/pkg/uid"
 )
 
+type errorWriter struct {
+	err error
+}
+
+func (w errorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
 // TestWrite tests the write package by ensuring that it is consistent with the
 // Parse implementation. In particular, it is tested by writing out known
 // collections of Element and reading them back in using the Parse API and
@@ -668,6 +676,65 @@ func TestWrite(t *testing.T) {
 				t.Errorf("Reading back written dataset led to unexpected diff from source data: %s", diff)
 			}
 		})
+	}
+}
+
+func TestWritePixelDataParseErrWritesRawFrameData(t *testing.T) {
+	rawPixelData := []byte{1, 2, 3}
+	ds := Dataset{Elements: []*Element{
+		mustNewElement(tag.MediaStorageSOPClassUID, []string{"1.2.840.10008.5.1.4.1.1.1.2"}),
+		mustNewElement(tag.MediaStorageSOPInstanceUID, []string{"1.2.3.4.5.6.7"}),
+		mustNewElement(tag.TransferSyntaxUID, []string{uid.ImplicitVRLittleEndian}),
+		mustNewElement(tag.Rows, []int{1}),
+		mustNewElement(tag.Columns, []int{1}),
+		mustNewElement(tag.BitsAllocated, []int{8}),
+		mustNewElement(tag.NumberOfFrames, []string{"1"}),
+		mustNewElement(tag.SamplesPerPixel, []int{1}),
+		mustNewElement(tag.PixelData, PixelDataInfo{
+			ParseErr: ErrorMismatchPixelDataLength,
+			Frames: []*frame.Frame{
+				{
+					EncapsulatedData: frame.EncapsulatedFrame{Data: rawPixelData},
+				},
+			},
+		}),
+	}}
+
+	buf := bytes.Buffer{}
+	if err := Write(&buf, ds); err != nil {
+		t.Fatalf("Write() returned unexpected error: %v", err)
+	}
+
+	readDS, err := Parse(bytes.NewReader(buf.Bytes()), int64(buf.Len()), nil, AllowMismatchPixelDataLength())
+	if err != nil {
+		t.Fatalf("Parse of written file returned unexpected error: %v", err)
+	}
+	readElem, err := readDS.FindElementByTag(tag.PixelData)
+	if err != nil {
+		t.Fatalf("FindElementByTag(%s) returned unexpected error: %v", tag.PixelData, err)
+	}
+	readPixelData := MustGetPixelDataInfo(readElem.Value)
+	if !errors.Is(readPixelData.ParseErr, ErrorMismatchPixelDataLength) {
+		t.Fatalf("ParseErr = %v, want %v", readPixelData.ParseErr, ErrorMismatchPixelDataLength)
+	}
+	if len(readPixelData.Frames) != 1 {
+		t.Fatalf("len(Frames) = %d, want 1", len(readPixelData.Frames))
+	}
+	wantPixelData := []byte{1, 2, 3, 0}
+	if diff := cmp.Diff(wantPixelData, readPixelData.Frames[0].EncapsulatedData.Data); diff != "" {
+		t.Errorf("PixelData bytes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestWritePixelDataIntentionallyUnprocessedReturnsWriteError(t *testing.T) {
+	wantErr := errors.New("write failed")
+	w := dicomio.NewWriter(errorWriter{err: wantErr}, binary.LittleEndian, true)
+	err := writePixelData(w, tag.PixelData, mustNewValue(PixelDataInfo{
+		IntentionallyUnprocessed: true,
+		UnprocessedValueData:     []byte{1, 2, 3, 4},
+	}), vrraw.OtherWord, 0)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("writePixelData() error = %v, want %v", err, wantErr)
 	}
 }
 

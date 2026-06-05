@@ -633,7 +633,19 @@ func writePixelData(w *dicomio.Writer, t tag.Tag, value Value, vr string, vl uin
 		// For now, IntentionallyUnprocessed will only happen for Native
 		// PixelData.
 		if image.IntentionallyUnprocessed {
-			w.WriteBytes(image.UnprocessedValueData)
+			return w.WriteBytes(image.UnprocessedValueData)
+		}
+		if image.ParseErr != nil {
+			length := 0
+			for _, frame := range image.Frames {
+				if err := w.WriteBytes(frame.EncapsulatedData.Data); err != nil {
+					return err
+				}
+				length += len(frame.EncapsulatedData.Data)
+			}
+			if length%2 != 0 {
+				return w.WriteByte(0)
+			}
 			return nil
 		}
 		numFrames := len(image.Frames)
